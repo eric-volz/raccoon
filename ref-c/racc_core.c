@@ -459,12 +459,9 @@ void racc_core_sign(racc_sig_t *sig, const uint8_t mu[RACC_MU_SZ],
     //  --- 21. return sig                                  [caller]
 }
 
-//  === racc_core_verify ===
-//  Verify that the signature "sig" is valid for digest "mu".
-//  Returns true iff signature is valid, false if not valid.
-bool racc_core_verify(  const racc_sig_t *sig,
-                        const uint8_t mu[RACC_MU_SZ],
-                        const racc_pk_t *pk)
+static bool racc_core_verify_once(  const racc_sig_t *sig,
+                                    const uint8_t mu[RACC_MU_SZ],
+                                    const racc_pk_t *pk)
 {
     int i, j;
     int64_t aij[RACC_N];
@@ -523,4 +520,33 @@ bool racc_core_verify(  const racc_sig_t *sig,
     //  --- 9. if c_hash != c_hash' return FAIL
     //  --- 10. (else) return OK
     return ct_equal(c_hchk, sig->ch, RACC_CH_SZ);
+}
+
+//  === racc_core_verify ===
+//  Verify that the signature "sig" is valid for digest "mu".
+//  Returns true iff signature is valid, false if not valid.
+bool racc_core_verify(  const racc_sig_t *sig,
+                        const uint8_t mu[RACC_MU_SZ],
+                        const racc_pk_t *pk)
+{
+    return racc_core_verify_once(sig, mu, pk);
+}
+
+//  === racc_core_verify_active ===
+//  Active side-channel protection using k+1 redundant verification runs.
+bool racc_core_verify_active( const racc_sig_t *sig,
+                              const uint8_t mu[RACC_MU_SZ],
+                              const racc_pk_t *pk,
+                              unsigned k)
+{
+    unsigned i;
+    bool rsp = racc_core_verify_once(sig, mu, pk);
+
+    for (i = 0; i < k; i++) {
+        if (racc_core_verify_once(sig, mu, pk) != rsp) {
+            return false;
+        }
+    }
+
+    return rsp;
 }
