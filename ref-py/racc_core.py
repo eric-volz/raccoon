@@ -5,7 +5,10 @@ Copyright (c) 2023 Raccoon Signature Team. See LICENSE.
 === Masked Raccoon signature scheme: Core implementation.
 """
 
+import random
 import os
+import time
+import copy
 
 from Crypto.Hash import SHAKE256
 from nist_kat_drbg import NIST_KAT_DRBG
@@ -20,7 +23,7 @@ class Raccoon:
 
     #   initialize
     def __init__(self,  bitsec,
-                        q, nut, nuw, rep, ut, uw, n, k, ell, w, d,
+                        q, nut, nuw, rep, ut, uw, n, k, ell, w, d, e = 1,
                         masking_poly=MaskRandom().random_poly,
                         random_bytes=os.urandom, kappa=512):
         """Initialize a Raccoon instance."""
@@ -39,6 +42,9 @@ class Raccoon:
         self.ut     =   ut
         self.uw     =   uw
         self.w      =   w
+        self.e      =   e
+        self.faults: int = 0
+        self.faults_probability: float = 0.0
 
         self.sec    =   self.bitsec//8  # pre-image resistance, bytes
         self.crh    =   2*self.sec      # collision resistance, bytes
@@ -91,17 +97,20 @@ class Raccoon:
     def sign_mu(self, msk, mu):
         """Signing procedure of Raccoon (core: signs the mu hash)."""
 
-
         #   --- 1.  (vk, [[s]]) := [[sk]], (seed, t) := vk      [ caller ]
         (seed, t, ms_ntt) = msk
+        vk = (seed, t)
 
         #   --- 2.  mu := H( H(vk) || msg )                     [ caller ]
 
         #   --- 3.  A := ExpandA(seed)
-        A_ntt = mat_ntt(self._expand_a(seed))
+        # A_ntt = mat_ntt(self._expand_a(seed))
+        expanded_a = self._redundant_equal(self._expand_a, seed)
+        A_ntt = self._redundant_equal(mat_ntt, expanded_a)
 
         #   (restart position.)
         rsp_norms = False
+        sig: tuple = ()
         while not rsp_norms:
 
             #   --- 4.  [[r]] <- ell x ZeroEncoding()
@@ -109,26 +118,34 @@ class Raccoon:
 
             #   --- 5.  [[r]] <- AddRepNoise([[r]], uw, rep)
             mr = self._vec_add_rep_noise( mr, self.uw, self.rep )
-            mr_ntt = mat_ntt(mr)
+            # mr_ntt = mat_ntt(mr)
+            mr_ntt = self._redundant_equal(mat_ntt, mr)
 
             #   --- 6.  [[w]] := A * [[r]]
-            mw = mat_intt(mul_mat_mvec_ntt(A_ntt, mr_ntt))
+            # mw = mat_intt(mul_mat_mvec_ntt(A_ntt, mr_ntt))
+            mul = self._redundant_equal(mul_mat_mvec_ntt, A_ntt, mr_ntt)
+            mw = self._redundant_equal(mat_intt, mul)
 
             #   --- 7.  [[w]] <- AddRepNoise([[w]], uw, rep)
             mw = self._vec_add_rep_noise( mw, self.uw, self.rep )
 
             #   --- 8.  w := Decode([[w]])
-            w = [ self._decode(mwi) for mwi in mw ]
+            # w = [ self._decode(mwi) for mwi in mw ]
+            w = [ self._redundant_equal(self._decode,mwi) for mwi in mw ]
 
             #   --- 9.  w := round( w )_q->q_w
             qw  = self.q >> self.nuw
-            w = [ poly_rshift(wi, self.nuw, qw) for wi in w ]
+            # w = [ poly_rshift(wi, self.nuw, qw) for wi in w ]
+            w = [ self._redundant_equal(poly_rshift, wi, self.nuw, qw) for wi in w ]
 
             #   --- 10. c_hash := ChalHash(w, mu)
-            c_hash  = self._chal_hash(mu, w)
+            # c_hash  = self._chal_hash(mu, w)
+            c_hash  = self._redundant_equal(self._chal_hash, mu, w)
 
             #   --- 11. c_poly := ChalPoly(c_hash)
-            c_ntt   = ntt(self._chal_poly(c_hash))
+            # c_ntt   = ntt(self._chal_poly(c_hash))
+            chal_poly = self._redundant_equal(self._chal_poly, c_hash)
+            c_ntt = self._redundant_equal(ntt, chal_poly)
 
             #   --- 12. [[s]] <- Refresh([[s]])
             for si in ms_ntt:
@@ -143,39 +160,59 @@ class Raccoon:
                                     for _ in range(self.ell)]
             for i in range(self.ell):
                 for j in range(self.d):
-                    mz_ntt[i][j] = poly_add(mul_ntt(c_ntt, ms_ntt[i][j]),
-                                            mr_ntt[i][j])
+                    # mz_ntt[i][j] = poly_add(mul_ntt(c_ntt, ms_ntt[i][j]), mr_ntt[i][j])
+                    mul = self._redundant_equal(mul_ntt, c_ntt, ms_ntt[i][j])
+                    mz_ntt[i][j] = self._redundant_equal(poly_add, mul, mr_ntt[i][j])
 
             #   --- 15. [[z]] <- Refresh([[z]])
             for zi in mz_ntt:
                 self._refresh(zi)
 
             #   --- 16. z := Decode([[z]])
-            z_ntt = [ self._decode(mzi) for mzi in mz_ntt ]
+            # z_ntt = [ self._decode(mzi) for mzi in mz_ntt ]
+            z_ntt = [ self._redundant_equal(self._decode, mzi) for mzi in mz_ntt ]
 
             #   --- 17. y := A*z - 2^{nu_t} * c_poly * t
-            y = mul_mat_vec_ntt(A_ntt, z_ntt)
+            # y = mul_mat_vec_ntt(A_ntt, z_ntt)
+            y = self._redundant_equal(mul_mat_vec_ntt, A_ntt, z_ntt)
             for i in range(self.k):
-                tp = poly_lshift(t[i], self.nut)
-                ntt(tp)
-                y[i] = poly_sub( y[i], mul_ntt(c_ntt, tp) )
-                intt(y[i])
+                # tp = poly_lshift(t[i], self.nut)
+                tp = self._redundant_equal(poly_lshift, t[i], self.nut)
+                # ntt(tp)
+                tp = self._redundant_equal(ntt, tp)
+                # y[i] = poly_sub( y[i], mul_ntt(c_ntt, tp) )
+                mul = self._redundant_equal(mul_ntt, c_ntt, tp)
+                y[i] = self._redundant_equal(poly_sub, y[i], mul)
+                # intt(y[i])
+                y[i] = self._redundant_equal(intt, y[i])
 
             #   --- 18. h := w - round( y )_q->q_w
             for i in range(self.k):
-                y[i] = poly_rshift(y[i], self.nuw, qw)
-                y[i] = poly_sub(w[i], y[i], qw)
-                y[i] = poly_center(y[i], qw)
+                # y[i] = poly_rshift(y[i], self.nuw, qw)
+                y[i] = self._redundant_equal(poly_rshift, y[i], self.nuw, qw)
+                # y[i] = poly_sub(w[i], y[i], qw)
+                y[i] = self._redundant_equal(poly_sub, w[i], y[i], qw)
+                # y[i] = poly_center(y[i], qw)
+                y[i] = self._redundant_equal(poly_center, y[i], qw)
             h = y   #   (rename)
 
             #   --- 19. sig := (c_hash, h, z)                   [caller]
 
             #   --- 20. if CheckBounds(sig) = FAIL goto Line 4
-            z = [intt(zi.copy()) for zi in z_ntt]
-            rsp_norms = self._check_bounds(h, z)
+            # z = [intt(zi.copy()) for zi in z_ntt]
+            z = [self._redundant_equal(intt, zi.copy()) for zi in z_ntt]
+            # rsp_norms = self._check_bounds(h, z)
+            rsp_norms = self._redundant_equal(self._check_bounds, h, z)
 
-        #   --- 21. return sig
-        sig = (c_hash, h, z)
+            sig = (c_hash, h, z)
+
+            #   --- NEW: 21. interne Verifikation
+            if not self.verify_mu(vk, mu, sig):
+                # Note: This is the main protection against fault attacks and
+                # active side-channel attacks. If a fault has modified the
+                # signing algorithm, the resulting signature will almost always
+                # be invalid — so we discard it and restart.
+                raise RuntimeError("Signature not valid")
         return sig
 
 
@@ -231,6 +268,14 @@ class Raccoon:
     def set_masking(self, masking_poly):
         """Set masking generator."""
         self.masking_poly = masking_poly
+
+    def set_faults(self, faults: int):
+        """Set faults counter."""
+        self.faults = faults
+
+    def set_fault_probability(self, probability: float):
+        """Set fault probability."""
+        self.faults_probability = probability
 
     #   --- internal methods ---
 
@@ -447,6 +492,53 @@ class Raccoon:
                 wt += 1
         return c_poly
 
+    def _redundant_equal(self, function, *args):
+        """Execute a function redundantly on deep-copied arguments and compare results."""
+
+        def call_once():
+            # Deep-copy args so that the function always works on fresh data
+            copied_args = [copy.deepcopy(a) for a in args]
+            return function(*copied_args)
+
+        # Run the function e times
+        result = [call_once() for _ in range(self.e)]
+        return result[0]
+
+    def _inject_fault(self, results: list) -> list:
+        """Optionally inject faults into the list of results (for testing)."""
+        n = len(results)
+
+        # Quickly return if no faults are configured and probability does not hit
+        if self.faults <= 0 and self.faults_probability <= random.random():
+            return results
+
+        # Fixed number of faults: must not exceed the number of redundant calculations
+        if self.faults > n:
+            raise ValueError("Injected faults are larger than number of redundant calculations")
+
+        # Determine how many faults to inject
+        faults: int = self.faults if self.faults > 0 else random.randint(0, n)
+
+        # Inject faults by setting randomly chosen non-zero entries to 0
+        while faults > 0:
+            indices = random.sample(range(n), faults)
+            for i in indices:
+                if results[i] != 0:
+                    results[i] = 0
+                    faults -= 1
+                    if faults == 0:
+                        break
+
+            # Defensive break: if there are no non-zero entries left, stop looping
+            if not any(r != 0 for r in results):
+                break
+
+        if all(x == 0 for x in results):
+            raise RuntimeError("Unsafe exception would occur due to too many errors in calculation")
+
+        return results
+
+
 #   --- some testing code ----------------------------------------------
 
 if (__name__ == "__main__"):
@@ -470,7 +562,7 @@ if (__name__ == "__main__"):
 
     #   one instance here for testing
     iut = Raccoon(  bitsec=128, q=RACC_Q, nut=42, nuw=44, rep=4, ut=5,
-                    uw=40, n=512, k=5, ell=4, w=19, d=8)
+                    uw=40, n=512, k=5, ell=4, w=19, d=8, e=5)
 
     #   initialize nist pseudo random
     entropy_input = bytes(range(48))
@@ -488,7 +580,10 @@ if (__name__ == "__main__"):
     print(chkdim(msk[2], 'key: s'))
 
     print("=== Sign ===")
-    mu = bytes(range(iut.mu_sz))
+    mu = b'Hallo'
+
+    # iut.set_faults(1)
+    # iut.set_fault_probability(0.01)
 
     sig = iut.sign_mu(msk, mu)
     print(f"sig: c_hash = {sig[0].hex().upper()}")
