@@ -331,6 +331,15 @@ class NIST_Raccoon(Raccoon):
         mu = self._buff_mu(tr, msg)
         return self.verify_mu(vk, mu, sig)
 
+    def byte_verify_active(self, msg, sm, pk, k):
+        """Active side-channel protected verification using redundancy."""
+        if len(sm) < self.sig_sz:
+            return False
+        vk, tr, _ = self.decode_pk(pk)
+        sig = self.decode_sig(sm[0:self.sig_sz])
+        mu = self._buff_mu(tr, msg)
+        return self.verify_mu_active(vk, mu, sig, k)
+
     def byte_sign(self, msg, sk):
         """(API) Signature "envelope" generation directly from/to bytes."""
         sig = self.byte_signature(msg, sk)

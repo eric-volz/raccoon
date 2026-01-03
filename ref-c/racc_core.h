@@ -21,6 +21,7 @@ extern "C" {
 #define racc_core_keygen RACC_(core_keygen)
 #define racc_core_sign RACC_(core_sign)
 #define racc_core_verify RACC_(core_verify)
+#define racc_core_verify_active RACC_(core_verify_active)
 #endif
 
 //  === Internal structures ===
@@ -59,6 +60,12 @@ void racc_core_sign(racc_sig_t *sig, const uint8_t mu[RACC_MU_SZ],
 bool racc_core_verify(  const racc_sig_t *sig,
                         const uint8_t mu[RACC_MU_SZ],
                         const racc_pk_t *pk);
+
+//  Active side-channel protected verification with k+1 redundant runs.
+bool racc_core_verify_active( const racc_sig_t *sig,
+                              const uint8_t mu[RACC_MU_SZ],
+                              const racc_pk_t *pk,
+                              unsigned k);
 
 #ifdef __cplusplus
 }

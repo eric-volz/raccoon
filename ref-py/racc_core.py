@@ -318,6 +318,24 @@ class Raccoon:
     def verify_mu(self, vk, mu, sig):
         """Verification procedure of Raccoon (core: verifies mu)."""
 
+        return self.verify_mu_active(vk, mu, sig, k=0)
+
+    def verify_mu_active(self, vk, mu, sig, k):
+        """Redundancy-hardened verification that runs k+1 times."""
+
+        if k < 0:
+            raise ValueError("k must be non-negative")
+
+        result = self._verify_mu_once(vk, mu, sig)
+        for _ in range(k):
+            if self._verify_mu_once(vk, mu, sig) != result:
+                return False
+
+        return result
+
+    def _verify_mu_once(self, vk, mu, sig):
+        """Single verification run (extracted to support redundancy)."""
+
         #   --- 1.  (c hash, h, z) := sig, (seed, t) := vk
         (c_hash, h, z) = sig
         (seed, t) = vk
