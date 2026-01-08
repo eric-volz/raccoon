@@ -7,7 +7,7 @@ For information about NIST PQC Signature submission requirements, see the [call 
 #	Root level directory structure of this repository:
 
 *	[ref-c](ref-c): Written in the style of a "portable ANSI C reference implementation" for NIST, and supports NIST API and KAT generation. This code has options for 32-bit CRT NTT arithmetic (default: off) and LFSR vs ASCON masking random (default: lfsr), used for various discussions.
-*	[ref-py](ref-py): Python implementation, also with NIST KAT testbench.
+*	[ref-py](ref_py): Python implementation, also with NIST KAT testbench.
 *	[doc](doc): Documentation, including [doc/raccoon.pdf](doc/raccoon.pdf), the current specification.
 
 Currently we are not delivering an AVX2, Cortex M4, or FPGA code to NIST; those aspects will be just discussed in the delivered document.

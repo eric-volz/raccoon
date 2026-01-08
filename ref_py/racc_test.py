@@ -15,7 +15,13 @@ from polyr import *
 
 BYTEORDER = "little"
 
+
+class ConsistencyError(Exception):
+    """Raised when redundant copies diverge in fault‑attack safe operations."""
+
+
 class Raccoon:
+    """Core implementation of the Masked Raccoon signature scheme."""
 
     ### Public Interface
 
@@ -24,7 +30,22 @@ class Raccoon:
                         q, nut, nuw, rep, ut, uw, n, k, ell, w, d,
                         masking_poly=MaskRandom().random_poly,
                         random_bytes=os.urandom, kappa=512):
-        """Initialize a Raccoon instance."""
+        """Initialize a Raccoon instance.
+
+        Args:
+            bitsec: security parameter in bits.
+            q: modulus used for polynomial arithmetic.
+            nut, nuw: bit shifts for rounding operations.
+            rep: number of repetitions for noise addition.
+            ut, uw: noise bit lengths for different vectors.
+            n: polynomial degree.
+            k, ell: matrix dimensions.
+            w: weight of the challenge polynomial.
+            d: number of masking shares.
+            masking_poly: callable returning random masking polynomials.
+            random_bytes: function returning random bytes (for seeds).
+            kappa: length of the seed for key generation.
+        """
 
         self.name   =   f'Raccoon-{bitsec}-{d}'
         self.bitsec =   bitsec
@@ -41,7 +62,8 @@ class Raccoon:
         self.uw     =   uw
         self.w      =   w
 
-        self.sec    =   self.bitsec//8  # pre-image resistance, bytes
+        # Derived sizes for hashing and serialization
+        self.sec    =   self.bitsec//8  # pre‑image resistance, bytes
         self.crh    =   2*self.sec      # collision resistance, bytes
         self.as_sz  =   self.sec        # A seed size
         self.mu_sz  =   self.crh        # mu digest H(tr, m) size
@@ -52,11 +74,11 @@ class Raccoon:
         self.masking_poly = masking_poly
         self.random_bytes = random_bytes
 
-        #   calculate derived parmeters
+        #   calculate derived parameters
         self._compute_metrics()
 
     def keygen(self):
-        """Raccoon keypair generation."""
+        """Raccoon keypair generation (basic variant)."""
 
         #   --- 1.  seed <- {0,1}^kappa
         seed = self.random_bytes(self.as_sz)
@@ -89,9 +111,46 @@ class Raccoon:
         msk = (seed, t, ms_ntt)
         return msk, vk
 
+    def keygen_fault_attack_safe(self, e: int):
+        """Raccoon keypair generation with redundancy for fault attack resistance."""
+
+        #   --- 1.  seed <- {0,1}^kappa
+        seed = self.random_bytes(self.as_sz)
+        lst_seed = [copy.deepcopy(seed) for _ in range(e)]
+
+        #   --- 2.  A := ExpandA(seed)
+        lst_A_ntt = [mat_ntt(self._expand_a(seed)) for seed in lst_seed]
+
+        #   --- 3.  [[s]] <- ell * ZeroEncoding(d)
+        # Create e independent copies of zero encodings for each share
+        lst_ms = [self._lst_zero_encoding(e) for _ in range(self.ell)]
+        # Transpose to shape [e][ell]
+        lst_ms = [[lst_ms[j][i] for j in range(self.ell)] for i in range(e)]
+
+        #   --- 4.  [[s]] <- AddRepNoise([[s]], ut, rep)
+        lst_ms = self._lst_vec_add_rep_noise( lst_ms, self.ut, self.rep )
+
+        #   --- 5.  [[t]] := A * [[s]]
+        lst_ms_ntt = [mat_ntt(ms) for ms in lst_ms]
+        lst_mt = [mat_intt(mul_mat_mvec_ntt(A_ntt, ms_ntt)) for A_ntt, ms_ntt in zip(lst_A_ntt, lst_ms_ntt)]
+
+        #   --- 6.  [[t]] <- AddRepNoise([[t]], ut, rep)
+        lst_mt = self._lst_vec_add_rep_noise( lst_mt, self.ut, self.rep )
+
+        #   --- 7.  t := Decode([[t]])
+        lst_t = [[ self._decode(mti) for mti in mt ] for mt in lst_mt ]
+
+        #   --- 8.  t := round( t_m )_q->q_t
+        lst_qt  = [self.q >> self.nut for _ in range(e)]
+        lst_t = [[ poly_rshift(ti, self.nut, qt) for ti in t ] for t, qt in zip(lst_t, lst_qt)]
+
+        #   --- 9.  return ( (vk := seed, t), sk:= (vk, [[s]]) )
+        vk = (lst_seed, lst_t)
+        msk = (lst_seed, lst_t, lst_ms_ntt)
+        return msk, vk
+
     def sign_mu(self, msk, mu):
         """Signing procedure of Raccoon (core: signs the mu hash)."""
-
 
         #   --- 1.  (vk, [[s]]) := [[sk]], (seed, t) := vk      [ caller ]
         (seed, t, ms_ntt) = msk
@@ -179,19 +238,26 @@ class Raccoon:
         sig = (c_hash, h, z)
         return sig
 
-    def sign_mu_fault_attack_safe(self, msk: tuple, mu: bytes, e: int, inject_error: callable = None) -> tuple:
-        """Signing procedure of Raccoon (core: signs the mu hash)."""
+    def sign_mu_fault_attack_safe(self, lst_msk: tuple, lst_mu: list, e: int, inject_error: callable = None) -> tuple:
+        """Signing procedure of Raccoon with fault‑attack safety.
+
+        Args:
+            lst_msk: tuple containing redundant copies of secret key (seed list, t list, s list in NTT form).
+            lst_mu: list of redundant copies of message digests.
+            e: number of redundant copies.
+            inject_error: optional callback to introduce faults for testing.
+
+        Returns:
+            A tuple (lst_c_hash, lst_h, lst_z) where each element is a list of length e containing the redundant outputs.
+        """
 
         if not inject_error:
             inject_error = lambda _: None
 
         #   --- 1.  (vk, [[s]]) := [[sk]], (seed, t) := vk      [ caller ]
-        (seed, t, ms_ntt) = msk
-        lst_seed = [seed for _ in range(e)]
+        (lst_seed, lst_t, lst_ms_ntt) = lst_msk
         inject_error(lst_seed)
-        lst_t = [t for _ in range(e)]
         inject_error(lst_t)
-        lst_ms_ntt = [ms_ntt for _ in range(e)]
         inject_error(lst_ms_ntt)
 
         #   --- 2.  mu := H( H(vk) || msg )                     [ caller ]
@@ -201,12 +267,11 @@ class Raccoon:
         inject_error(lst_A_ntt)
 
         #   (restart position.)
-        rsp_norms = False
-        while not rsp_norms:
-
+        lst_rsp_norms = []
+        while not lst_rsp_norms or not all(lst_rsp_norms):
             #   --- 4.  [[r]] <- ell x ZeroEncoding()
-            mr = [ self._zero_encoding() for _ in range(self.ell) ]
-            lst_mr = [copy.deepcopy(mr) for _ in range(e)]
+            lst_mr = [ self._lst_zero_encoding(e) for _ in range(self.ell) ]
+            lst_mr = [[lst_mr[j][i] for j in range(self.ell)] for i in range(e)]
             inject_error(lst_mr)
 
             #   --- 5.  [[r]] <- AddRepNoise([[r]], uw, rep)
@@ -234,24 +299,26 @@ class Raccoon:
             inject_error(lst_w)
 
             #   --- 10. c_hash := ChalHash(w, mu)
-            lst_c_hash  = [self._chal_hash(mu, w) for w in lst_w]
+            # Compute challenge hash separately for each copy
+            lst_c_hash  = [self._chal_hash(mu, w) for mu, w in zip(lst_mu, lst_w)]
             inject_error(lst_c_hash)
-            self._consistency_check(lst_c_hash, "lst_c_hash")
 
             #   --- 11. c_poly := ChalPoly(c_hash)
             lst_c_ntt   = [ntt(self._chal_poly(c_hash)) for c_hash in lst_c_hash]
             inject_error(lst_c_ntt)
 
             #   --- 12. [[s]] <- Refresh([[s]])
-
-            ms_ntt_vec_len = len(lst_ms_ntt[0])
-            for si in range(ms_ntt_vec_len):
+            # Refresh each share of ms_ntt for each copy index
+            # Refresh each share of the secret vector across all redundant copies.
+            # Use self.ell rather than inspecting the first element to avoid
+            # accidental mismatches if the structure is tampered with.
+            for si in range(self.ell):
                 self._lst_refresh(lst_ms_ntt, si)
             inject_error(lst_ms_ntt)
 
             #   --- 13. [[r]] <- Refresh([[r]])
-            mr_ntt_vec_len = len(lst_mr_ntt[0])
-            for ri in range(mr_ntt_vec_len):
+            # Refresh each share of the randomness vector across all copies.
+            for ri in range(self.ell):
                 self._lst_refresh(lst_mr_ntt, ri)
             inject_error(lst_mr_ntt)
 
@@ -260,18 +327,18 @@ class Raccoon:
             for idx in range(e):
                 for i in range(self.ell):
                     for j in range(self.d):
+                        # Multiply challenge polynomial with each share and add r
                         lst_mz_ntt[idx][i][j] = poly_add(mul_ntt(lst_c_ntt[idx], lst_ms_ntt[idx][i][j]), lst_mr_ntt[idx][i][j])
             inject_error(lst_mz_ntt)
 
             #   --- 15. [[z]] <- Refresh([[z]])
-            mz_ntt_vec_len = len(lst_mz_ntt[0])
-            for zi in range(mz_ntt_vec_len):
+            # Refresh each share of the computed z vector across all copies.
+            for zi in range(self.ell):
                 self._lst_refresh(lst_mz_ntt, zi)
             inject_error(lst_mz_ntt)
 
             #   --- 16. z := Decode([[z]])
             lst_z_ntt = [[ self._decode(mzi) for mzi in mz_ntt ] for mz_ntt in lst_mz_ntt]
-            self._consistency_check(lst_z_ntt, "lst_z_ntt")
 
             #   --- 17. y := A*z - 2^{nu_t} * c_poly * t
             lst_y = [mul_mat_vec_ntt(A_ntt, z_ntt) for A_ntt, z_ntt in zip(lst_A_ntt, lst_z_ntt)]
@@ -279,6 +346,7 @@ class Raccoon:
                 for i in range(self.k):
                     tp = poly_lshift(lst_t[idx][i], self.nut)
                     ntt(tp)
+                    # Subtract c * tp in NTT domain and return to normal domain
                     lst_y[idx][i] = poly_sub( lst_y[idx][i], mul_ntt(lst_c_ntt[idx], tp) )
                     intt(lst_y[idx][i])
             inject_error(lst_y)
@@ -293,25 +361,33 @@ class Raccoon:
                 h = lst_y[idx]   #   (rename)
                 lst_h.append(h)
             inject_error(lst_h)
-            self._consistency_check(lst_h, "h")
 
             #   --- 19. sig := (c_hash, h, z)                   [caller]
 
             #   --- 20. if CheckBounds(sig) = FAIL goto Line 4
+            # Convert shares back to time domain for z
             lst_z = [[intt(zi.copy()) for zi in z_ntt] for z_ntt in lst_z_ntt]
             inject_error(lst_z)
             lst_rsp_norms = [self._check_bounds(h, z) for h, z in zip(lst_h, lst_z)]
             inject_error(lst_rsp_norms)
-            self._consistency_check(lst_rsp_norms, "rsp_norms")
-            rsp_norms = lst_rsp_norms[0]
 
-        #   --- 21. return sig
-        return lst_c_hash[0], lst_h[0], lst_z[0]
+        #   --- 21. Consistency check
+        # Ensure all redundant copies agree; otherwise raise ConsistencyError.
+        # The second argument provides a descriptive label used in the
+        # exception message if a mismatch is detected.  It should
+        # reflect the variable being checked for clarity.
+        self._consistency_check(lst_c_hash, "lst_c_hash")
+        self._consistency_check(lst_h, "lst_h")
+        self._consistency_check(lst_z, "lst_z")
+
+        #   --- 22. return sig
+        return lst_c_hash, lst_h, lst_z
 
     @staticmethod
     def _consistency_check(lst: list, name: str) -> bool:
+        """Ensure all elements in lst are identical. Raise on mismatch."""
         if not all(x == lst[0] for x in lst):
-            raise ValueError(f"Abort due to missing consistency in: {name}")
+            raise ConsistencyError(f"Abort due to missing consistency in: {name}")
         return True
 
 
@@ -456,6 +532,22 @@ class Raccoon:
             i <<= 1
         return z
 
+    def _lst_zero_encoding(self, e: int):
+        """ZeroEncoding(): Create a masked encoding of zero for e copies."""
+
+        z = [[ [0] * self.n for _ in range(self.d) ] for _ in range(e)]
+        i = 1
+        #   same ops as with recursion, but using nested loops
+        while i < self.d:
+            for j in range(0, self.d, 2 * i):
+                for k in range(j, j + i):
+                    r = self.masking_poly()
+                    for idx in range(e):
+                        z[idx][k] = poly_add(z[idx][k], r)
+                        z[idx][k + i] = poly_sub(z[idx][k + i], r)
+            i <<= 1
+        return z
+
     def _refresh(self, v, z: list = None):
         """Refresh(): Refresh shares via ZeroEncoding."""
         if not z:
@@ -464,15 +556,16 @@ class Raccoon:
             v[i] = poly_add(v[i], z[i])
 
     def _lst_refresh(self, lst_v, idx_ell):
+        """Refresh a specific share of all vectors in lst_v."""
 
         num_vecs = len(lst_v)
         if num_vecs == 0:
             return lst_v
 
-        z = self._zero_encoding()  # [d][n]
+        z = self._lst_zero_encoding(num_vecs)
 
         for idx in range(num_vecs):
-            self._refresh(lst_v[idx][idx_ell], z)
+            self._refresh(lst_v[idx][idx_ell], z[idx])
 
         return lst_v
 
@@ -519,7 +612,7 @@ class Raccoon:
 
 
     def _vec_add_rep_noise(self, v, u, rep):
-        """Repeatedly add uniform noise."""
+        """Repeatedly add uniform noise to each share."""
 
         #   --- 1.  for i in [ |v| ] do
         for i in range(len(v)):
@@ -548,6 +641,7 @@ class Raccoon:
         return v
 
     def _lst_vec_add_rep_noise(self, lst_v, u, rep):
+        """Add noise to each share in a list of redundant vectors."""
         # Number of redundant copies (e.g. e = 2, 3, ...)
         num_vecs = len(lst_v)
         if num_vecs == 0:
@@ -569,14 +663,13 @@ class Raccoon:
                     sigma = self.random_bytes(self.sec)
 
                     # --- 5.  hdr_u = ( 'u', rep, i, j, 0, 0, 0, 0 ) || sigma
-                    hdr_u = bytes([ord('u'), i_rep, i, j,
-                                   0, 0, 0, 0]) + sigma
+                    lst_hdr_u = [bytes([ord('u'), i_rep, i, j, 0, 0, 0, 0]) + sigma for _ in range(num_vecs)]
 
                     # --- 6.  v_i,j <- v_i,j + SampleU( hdr_u, u )
-                    r = self._xof_sample_u(hdr_u, u)
+                    lst_r = [self._xof_sample_u(hdr_u, u) for hdr_u in lst_hdr_u]
 
                     # Add the same noise r to all redundant copies
-                    for idx in range(num_vecs):
+                    for idx, r in zip(range(num_vecs), lst_r):
                         lst_v[idx][i][j] = poly_add(lst_v[idx][i][j], r)
 
                 # --- 7. Refresh([[v_i]]) but shared across all copies
@@ -602,7 +695,7 @@ class Raccoon:
             for i in range(self.k):
                 xof.update(bytes(w[i]))
         else:
-            #   general version where little-endian encoding may be needed
+            #   general version where little‑endian encoding may be needed
             for i in range(self.k):
                 for j in range(self.n):
                     xof.update(w[i][j].to_bytes(blen, byteorder=BYTEORDER))
@@ -623,7 +716,7 @@ class Raccoon:
         xof.update(bytes([ord('c'), self.w, 0, 0, 0, 0, 0, 0]))
         xof.update(c_hash)
 
-        #   Create a "w"-weight ternary polynomial
+        #   Create a "w"‑weight ternary polynomial
         c_poly = [0] * self.n
         wt = 0
         while wt < self.w:
@@ -658,6 +751,13 @@ if (__name__ == "__main__"):
         return s
 
     #   one instance here for testing
+    # Note: RACC_Q and polyr functions must be defined for a full test.
+    try:
+        from polyr import RACC_Q
+    except Exception:
+        # Placeholder modulus
+        RACC_Q = 549824583172097
+
     iut = Raccoon(  bitsec=128, q=RACC_Q, nut=42, nuw=44, rep=4, ut=5,
                     uw=40, n=512, k=5, ell=4, w=19, d=8)
 
@@ -671,23 +771,20 @@ if (__name__ == "__main__"):
     print(f'name = {iut.name}')
 
     print("=== Keygen ===")
-    msk, vk = iut.keygen()
-    print(f"key: seed = {msk[0].hex().upper()}")
+    msk, vk = iut.keygen_fault_attack_safe(4)
     print(chkdim(msk[1], 'key: t'))
     print(chkdim(msk[2], 'key: s'))
 
     print("=== Sign ===")
     mu = bytes(range(iut.mu_sz))
+    lst_mu = [copy.deepcopy(mu) for _ in range(4)]
 
     # sig = iut.sign_mu(msk, mu)
     t = time.time()
-    sig = iut.sign_mu_fault_attack_safe(msk, mu, 2)
+    sig = iut.sign_mu_fault_attack_safe(msk, lst_mu, 4)
     print(time.time() - t)
-    print(f"sig: c_hash = {sig[0].hex().upper()}")
-    print(chkdim(sig[1], 'sig: z'))
-    print(chkdim(sig[2], 'sig: h'))
 
     print("=== Verify ===")
-    rsp = iut.verify_mu(vk, mu, sig)
+    rsp = iut.verify_mu((vk[0][0], vk[1][0]), mu, (sig[i][0] for i in range(len(sig))))
     print(rsp)
     assert(rsp is True)
