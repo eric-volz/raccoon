@@ -270,8 +270,10 @@ class Study:
         if has_error and not successful:
             result["expected_error"] = expected_error
             result["error_msg"] = error_msg
+            result["injected_error"] = fault_attack.error
         elif has_error and successful:
             result["rounding_removed_error"] = rounding_removed_error
+            result["injected_error"] = fault_attack.error
 
         return run_id, result
 

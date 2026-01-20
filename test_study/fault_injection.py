@@ -10,6 +10,7 @@ class Fault:
         self.fault_executions: list = fault_executions
         self.number_of_calls: int = 0
         self.injected: int = 0
+        self.error = None
 
     @staticmethod
     def generate(fault_probability: float, number_of_faults: int) -> "Fault" or None:
@@ -17,11 +18,10 @@ class Fault:
             return Fault([random.randint(0, Fault.FUNCTION_INVOCATIONS - 1) for _ in range(number_of_faults)])
         return None
 
-    @staticmethod
-    def _inject_recursive(entry: any, maximum = None) -> any:
+    def _inject_recursive(self, entry: any, maximum = None) -> any:
         if isinstance(entry, list):
             inject_into = random.randint(0, len(entry) - 1)
-            entry[inject_into] = Fault._inject_recursive(entry[inject_into], max(entry))
+            entry[inject_into] = self._inject_recursive(entry[inject_into], max(entry))
             return entry
 
         if isinstance(entry, bool):
@@ -30,6 +30,7 @@ class Fault:
         if isinstance(entry, int):
             error: int = random.randint(1, maximum)
             entry += error
+            self.error = error
             return entry
 
         if isinstance(entry, bytes):
@@ -39,6 +40,7 @@ class Fault:
                 r = random.getrandbits(8)
                 if r != data[inject_into]:
                     data[inject_into] = r
+                    self.error = r
                     break
             return bytes(data)
 
