@@ -270,9 +270,11 @@ class Study:
         if has_error and not successful:
             result["expected_error"] = expected_error
             result["error_msg"] = error_msg
+            result["original_entry"] = fault_attack.original
             result["injected_error"] = fault_attack.error
         elif has_error and successful:
             result["rounding_removed_error"] = rounding_removed_error
+            result["original_entry"] = fault_attack.original
             result["injected_error"] = fault_attack.error
 
         return run_id, result
@@ -303,6 +305,7 @@ class Study:
             for fut in as_completed(futures):
                 run_id = futures[fut]
                 _, result = fut.result()
+                print(run_id, result)
 
                 self.data["study"]["runs"][run_id].update(result)
                 pending_runs[run_id] = result
@@ -317,7 +320,7 @@ class Study:
 
 
 if __name__ == "__main__":
-    study = Study("study.json", num_of_redundancy=4)
+    study = Study("study.json", num_of_redundancy=2)
     study.generate_executions(100, 0.9, 1)
 
     s = Study.load_executions("study.json")

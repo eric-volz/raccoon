@@ -1,4 +1,5 @@
 import random
+import copy
 
 
 class Fault:
@@ -10,6 +11,7 @@ class Fault:
         self.fault_executions: list = fault_executions
         self.number_of_calls: int = 0
         self.injected: int = 0
+        self.original = None
         self.error = None
 
     @staticmethod
@@ -28,12 +30,14 @@ class Fault:
             return False if entry is True else True
 
         if isinstance(entry, int):
+            self.original = copy.deepcopy(entry)
             error: int = random.randint(1, maximum)
             entry += error
             self.error = error
             return entry
 
         if isinstance(entry, bytes):
+            self.original = copy.deepcopy(entry).hex()
             data = bytearray(entry)
             inject_into = random.randint(0, len(data) - 1)
             while True:
